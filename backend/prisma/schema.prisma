@@ -1,0 +1,73 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Location {
+  id            Int       @id @default(autoincrement())
+  location_name String    @unique @db.VarChar(255)
+  region        String    @db.VarChar(100)
+  machines      Machine[]
+
+  @@map("locations")
+}
+
+model Machine {
+  id           Int      @id @default(autoincrement())
+  machine_name String   @unique @db.VarChar(255)
+  location_id  Int
+  location     Location @relation(fields: [location_id], references: [id], onDelete: Cascade)
+  orders       Order[]
+
+  @@map("machines")
+}
+
+model Product {
+  id           Int         @id @default(autoincrement())
+  product_name String      @unique @db.VarChar(255)
+  category     String      @db.VarChar(100)
+  cost_price   Decimal     @db.Decimal(10, 2)
+  sale_price   Decimal     @db.Decimal(10, 2)
+  stock        Int         @default(100)
+  order_items  OrderItem[]
+
+  @@map("products")
+}
+
+model Order {
+  id           Int         @id @default(autoincrement())
+  order_number String      @unique @db.VarChar(100)
+  machine_id   Int
+  machine      Machine     @relation(fields: [machine_id], references: [id])
+  payment_type String      @db.VarChar(50)
+  total_amount Decimal     @db.Decimal(10, 2)
+  created_at   DateTime    @db.Timestamp
+  order_items  OrderItem[]
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id         Int     @id @default(autoincrement())
+  order_id   Int
+  order      Order   @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  product_id Int
+  product    Product @relation(fields: [product_id], references: [id])
+  qty        Int
+  unit_price Decimal @db.Decimal(10, 2)
+  cost_price Decimal @db.Decimal(10, 2)
+
+  @@map("order_items")
+}
+
