@@ -1,0 +1,10 @@
+==> Seeding auth (roles, permissions, users)...
+(cd backend && npm run seed:auth)
+
+if [ 0 -ne 0 ]; then
+  echo × Auth seeding failed.
+  exit 1
+fi
+
+echo 
+echo == data from cleaned_transactions.csv...

@@ -1,85 +1,84 @@
-// // src/routes/dashboardRoutes.js
-// const express = require("express");
-// const router = express.Router();
-// const { getDashboardData } = require("../controllers/dashboardController");
+const router       = require('express').Router();
+const authenticate = require('../middleware/authenticate');
+const authorize    = require('../middleware/authorize');
+const { pool }     = require('../db');
 
-// // Define a GET route for fetching the full analytics payload
-// router.get("/dashboard", getDashboardData);
-
-// module.exports = router;
-
-// src/routes/dashboardRoutes.js
-const express = require("express");
-const router = express.Router();
-const { PrismaClient } = require("@prisma/client");
-const prisma = new PrismaClient();
-
-// Combined Controller Logic directly inside the Route file to bypass path issues
-router.get("/dashboard", async (req, res) => {
+router.get('/dashboard', authenticate, authorize('dashboard:read'), async (req, res) => {
   try {
-    // 1. Core Card Metrics
-    const salesAggregate = await prisma.order.aggregate({
-      _sum: { total_amount: true },
-      _count: { id: true }
-    });
+    const [cardsResult, hourlyResult, categoryResult, regionalResult, paymentResult] =
+      await Promise.all([
 
-    const costResult = await prisma.$queryRaw`
-      SELECT SUM(qty * cost_price) as total_cost FROM order_items
-    `;
-    
-    const totalSales = Number(salesAggregate._sum.total_amount) || 0;
-    const totalOrders = Number(salesAggregate._count.id) || 0;
-    const totalCost = Number(costResult[0]?.total_cost) || 0;
-    const totalProfit = totalSales - totalCost;
+        // KPI cards — revenue/orders direct from invoices, cost via LEFT JOIN to handle legacy rows
+        pool.query(`
+          SELECT
+            (SELECT COALESCE(SUM(total_amount), 0) FROM invoices)  AS "totalSales",
+            (SELECT COUNT(*)                        FROM invoices)  AS "totalOrders",
+            COALESCE(SUM(ii.quantity * COALESCE(p.purchase_price, pcfg.standard_price)), 0) AS "totalCost"
+          FROM invoice_items ii
+          JOIN products p              ON ii.product_id  = p.id
+          LEFT JOIN product_configs pcfg ON p.config_id = pcfg.id
+        `),
 
-    // 2. Chart Trend 1: Sales By Hour Map Data
-    const salesByHour = await prisma.$queryRaw`
-      SELECT TO_CHAR(created_at, 'HH24') as hour, 
-             CAST(SUM(total_amount) AS FLOAT) as sales
-      FROM orders
-      GROUP BY hour
-      ORDER BY hour ASC
-    `;
+        // Sales by hour
+        pool.query(`
+          SELECT TO_CHAR(created_at, 'HH24:00') AS hour,
+                 COALESCE(SUM(total_amount), 0) AS sales
+          FROM invoices
+          GROUP BY hour
+          ORDER BY hour
+        `),
 
-    // 3. Chart Trend 2: Sales By Product Category Data
-    const salesByCategory = await prisma.$queryRaw`
-      SELECT p.category, CAST(SUM(oi.qty * oi.unit_price) AS FLOAT) as sales
-      FROM order_items oi
-      JOIN products p ON oi.product_id = p.id
-      GROUP BY p.category
-      ORDER BY sales DESC
-    `;
+        // Sales by product category
+        pool.query(`
+          SELECT COALESCE(cat.name, 'Uncategorized') AS category,
+                 COALESCE(SUM(ii.subtotal), 0)       AS sales
+          FROM invoice_items ii
+          JOIN products p                ON ii.product_id    = p.id
+          LEFT JOIN product_configs pcfg ON p.config_id      = pcfg.id
+          LEFT JOIN product_categories cat ON pcfg.category_id = cat.id
+          GROUP BY cat.name
+          ORDER BY sales DESC
+        `),
 
-    // 4. Chart Trend 3: Sales By Region Area Data
-    const salesByRegion = await prisma.$queryRaw`
-      SELECT l.region, CAST(SUM(o.total_amount) AS FLOAT) as sales
-      FROM orders o
-      JOIN machines m ON o.machine_id = m.id
-      JOIN locations l ON m.location_id = l.id
-      GROUP BY l.region
-      ORDER BY sales DESC
-    `;
+        // Sales by region (historical data has vending_machine_id → route → region)
+        pool.query(`
+          SELECT r.name                           AS region,
+                 COALESCE(SUM(i.total_amount), 0) AS sales
+          FROM invoices i
+          JOIN vending_machines vm ON i.vending_machine_id = vm.id
+          JOIN routes rt           ON vm.route_id           = rt.id
+          JOIN regions r           ON rt.region_id          = r.id
+          GROUP BY r.name
+          ORDER BY sales DESC
+        `),
 
-    // 5. Chart Trend 4: Payment Types Distribution 
-    const paymentAnalysis = await prisma.$queryRaw`
-      SELECT payment_type as type, CAST(SUM(total_amount) AS FLOAT) as sales
-      FROM orders
-      GROUP BY payment_type
-    `;
+        // Sales by payment type
+        pool.query(`
+          SELECT payment_type                      AS type,
+                 COALESCE(SUM(total_amount), 0)   AS sales
+          FROM invoices
+          WHERE payment_type IS NOT NULL
+          GROUP BY payment_type
+        `),
+      ]);
 
     res.json({
-      cards: { totalSales, totalOrders, totalCost, totalProfit },
+      cards: {
+        totalSales:  parseFloat(cardsResult.rows[0].totalSales),
+        totalOrders: parseInt(cardsResult.rows[0].totalOrders),
+        totalCost:   parseFloat(cardsResult.rows[0].totalCost),
+        totalProfit: parseFloat(cardsResult.rows[0].totalSales) - parseFloat(cardsResult.rows[0].totalCost),
+      },
       charts: {
-        hourlyTrends: salesByHour,
-        categoryBreakdown: salesByCategory,
-        regionalPerformance: salesByRegion,
-        paymentDistribution: paymentAnalysis
-      }
+        hourlyTrends:        hourlyResult.rows.map(r => ({ hour: r.hour, sales: parseFloat(r.sales) })),
+        categoryBreakdown:   categoryResult.rows.map(r => ({ category: r.category, sales: parseFloat(r.sales) })),
+        regionalPerformance: regionalResult.rows.map(r => ({ region: r.region, sales: parseFloat(r.sales) })),
+        paymentDistribution: paymentResult.rows.map(r => ({ type: r.type, sales: parseFloat(r.sales) })),
+      },
     });
-
   } catch (error) {
-    console.error("Database calculation aggregate error:", error);
-    res.status(500).json({ error: "Internal Server Processing Error" });
+    console.error('Dashboard query error:', error.message);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
