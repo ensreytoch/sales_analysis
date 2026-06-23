@@ -21,9 +21,9 @@ function StockBadge({ qty }) {
   return <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-600">{qty} in stock</span>;
 }
 
-const EMPTY_FORM = { config_id: '', purchase_price: '', initial_stock: '0' };
+const EMPTY_FORM = { config_id: '', location_id: '', purchase_price: '', initial_stock: '0' };
 
-function ProductModal({ form, setForm, allConfigs, onSave, onClose, isEdit, editTarget, saving, error }) {
+function ProductModal({ form, setForm, allConfigs, allLocations, isAdmin, onSave, onClose, isEdit, editTarget, saving, error }) {
   const selectedConfig = allConfigs.find(c => String(c.id) === String(form.config_id));
 
   useEffect(() => {
@@ -70,6 +70,20 @@ function ProductModal({ form, setForm, allConfigs, onSave, onClose, isEdit, edit
                 <option value="">Choose a product…</option>
                 {allConfigs.map(c => (
                   <option key={c.id} value={c.id}>{c.name} — {c.category} (${Number(c.standard_price).toFixed(2)})</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Location selector — admins only, cashiers use their assigned location */}
+          {!isEdit && isAdmin && (
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-gray-500">Location</label>
+              <select value={form.location_id} onChange={e => setForm(f => ({ ...f, location_id: e.target.value }))}
+                className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 bg-white">
+                <option value="">Choose a location…</option>
+                {allLocations.map(l => (
+                  <option key={l.id} value={l.id}>{l.name} — {l.organization}</option>
                 ))}
               </select>
             </div>
@@ -252,10 +266,12 @@ const LIMIT = 20;
 export default function ProductsPage() {
   const { user } = useAuth();
   const canWrite = user?.permissions?.includes('products:write');
+  const isAdmin  = ['Admin', 'Viewer'].includes(user?.roleName);
 
   const [products,    setProducts]    = useState([]);
   const [categories,  setCategories]  = useState([]);
   const [allConfigs,  setAllConfigs]  = useState([]);
+  const [allLocations, setAllLocations] = useState([]);
   const [loading,     setLoading]     = useState(true);
   const [total,       setTotal]       = useState(0);
   const [page,        setPage]        = useState(1);
@@ -264,6 +280,7 @@ export default function ProductsPage() {
 
   const [search,      setSearch]      = useState('');
   const [filterCat,   setFilterCat]   = useState('');
+  const [filterLoc,   setFilterLoc]   = useState('');
   const searchTimer = useRef(null);
 
   const [modal,       setModal]       = useState(null);
@@ -273,12 +290,13 @@ export default function ProductsPage() {
   const [saving,      setSaving]      = useState(false);
   const [modalError,  setModalError]  = useState('');
 
-  const fetchProducts = useCallback(async (p = page, s = search, cat = filterCat) => {
+  const fetchProducts = useCallback(async (p = page, s = search, cat = filterCat, loc = filterLoc) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page: p, limit: LIMIT });
       if (s)   params.set('search',      s);
       if (cat) params.set('category_id', cat);
+      if (loc) params.set('location_id', loc);
 
       const requests = [api.get(`/products?${params}`)];
       if (!categories.length) requests.push(api.get('/products/categories'));
@@ -294,18 +312,27 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, search, filterCat, categories.length]);
+  }, [page, search, filterCat, filterLoc, categories.length]);
 
   const fetchAllConfigs = useCallback(async () => {
     try {
       const { data } = await api.get('/product-configs/all');
       setAllConfigs(data);
-    } catch (err) {
-      console.error(err);
-    }
+    } catch (err) { console.error(err); }
   }, []);
 
-  useEffect(() => { fetchProducts(1, search, filterCat); fetchAllConfigs(); }, []);
+  const fetchAllLocations = useCallback(async () => {
+    try {
+      const { data } = await api.get('/locations');
+      setAllLocations(data);
+    } catch (err) { console.error(err); }
+  }, []);
+
+  useEffect(() => {
+    fetchProducts(1, search, filterCat, filterLoc);
+    fetchAllConfigs();
+    if (isAdmin) fetchAllLocations();
+  }, []);
 
   // Debounced search
   const handleSearch = (val) => {
@@ -313,14 +340,20 @@ export default function ProductsPage() {
     clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(() => {
       setPage(1);
-      fetchProducts(1, val, filterCat);
+      fetchProducts(1, val, filterCat, filterLoc);
     }, 350);
   };
 
   const handleCatChange = (val) => {
     setFilterCat(val);
     setPage(1);
-    fetchProducts(1, search, val);
+    fetchProducts(1, search, val, filterLoc);
+  };
+
+  const handleLocChange = (val) => {
+    setFilterLoc(val);
+    setPage(1);
+    fetchProducts(1, search, filterCat, val);
   };
 
   const goToPage = (p) => {
@@ -332,6 +365,7 @@ export default function ProductsPage() {
 
   const openAdd = () => {
     if (!allConfigs.length) fetchAllConfigs();
+    if (isAdmin && !allLocations.length) fetchAllLocations();
     setForm(EMPTY_FORM);
     setModalError('');
     setModal('add');
@@ -355,11 +389,14 @@ export default function ProductsPage() {
     setModalError('');
     if (modal === 'add' && !form.config_id)
       return setModalError('Please select a product from the catalog.');
+    if (modal === 'add' && isAdmin && !form.location_id)
+      return setModalError('Please select a location.');
     setSaving(true);
     try {
       if (modal === 'add') {
         await api.post('/products', {
           config_id:      parseInt(form.config_id),
+          location_id:    form.location_id ? parseInt(form.location_id) : undefined,
           purchase_price: form.purchase_price ? parseFloat(form.purchase_price) : null,
           initial_stock:  parseInt(form.initial_stock),
         });
@@ -450,15 +487,22 @@ export default function ProductsPage() {
           )}
 
           {/* Filters */}
-          <div className="flex gap-3 shrink-0">
+          <div className="flex gap-3 shrink-0 flex-wrap">
             <input value={search} onChange={e => handleSearch(e.target.value)}
               placeholder="Search products…"
-              className="flex-1 max-w-xs border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+              className="flex-1 min-w-[160px] max-w-xs border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
             <select value={filterCat} onChange={e => handleCatChange(e.target.value)}
               className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 bg-white">
               <option value="">All Categories</option>
               {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
+            {isAdmin && (
+              <select value={filterLoc} onChange={e => handleLocChange(e.target.value)}
+                className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 bg-white">
+                <option value="">All Locations</option>
+                {allLocations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+              </select>
+            )}
           </div>
 
           {/* Table */}
@@ -467,16 +511,16 @@ export default function ProductsPage() {
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-gray-50 border-b border-gray-100 z-10">
                   <tr>
-                    {['Product', 'Category', 'Unit Price', 'Stock', 'Actions'].map(h => (
+                    {['Product', 'Category', ...(isAdmin ? ['Location'] : []), 'Unit Price', 'Stock', 'Actions'].map(h => (
                       <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wide">{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
                   {loading ? (
-                    <tr><td colSpan={5} className="py-16 text-center text-gray-300 text-sm">Loading…</td></tr>
+                    <tr><td colSpan={isAdmin ? 6 : 5} className="py-16 text-center text-gray-300 text-sm">Loading…</td></tr>
                   ) : products.length === 0 ? (
-                    <tr><td colSpan={5} className="py-16 text-center text-gray-400 text-sm">No products found</td></tr>
+                    <tr><td colSpan={isAdmin ? 6 : 5} className="py-16 text-center text-gray-400 text-sm">No products found</td></tr>
                   ) : products.map(p => (
                     <tr key={p.id} className="hover:bg-gray-50/60 transition">
                       <td className="px-4 py-3">
@@ -489,6 +533,7 @@ export default function ProductsPage() {
                         </div>
                       </td>
                       <td className="px-4 py-3 text-gray-500 text-xs">{p.category}</td>
+                      {isAdmin && <td className="px-4 py-3 text-gray-500 text-xs">{p.location_name || '—'}</td>}
                       <td className="px-4 py-3 font-semibold text-gray-700">${Number(p.purchase_price).toFixed(2)}</td>
                       <td className="px-4 py-3"><StockBadge qty={p.stock_qty}/></td>
                       <td className="px-4 py-3">
@@ -542,6 +587,7 @@ export default function ProductsPage() {
 
       {(modal === 'add' || modal === 'edit') && (
         <ProductModal form={form} setForm={setForm} allConfigs={allConfigs}
+          allLocations={allLocations} isAdmin={isAdmin}
           onSave={handleSave} onClose={() => setModal(null)}
           isEdit={modal === 'edit'} editTarget={target}
           saving={saving} error={modalError}/>

@@ -22,7 +22,7 @@ async function login(req, res) {
 
   try {
     const { rows: [user] } = await pool.query(
-      `SELECT u.id, u.email, u.password_hash, u.full_name, u.is_active,
+      `SELECT u.id, u.email, u.password_hash, u.full_name, u.is_active, u.location_id,
               r.id AS role_id, r.name AS role_name
        FROM users u
        JOIN roles r ON u.role_id = r.id
@@ -47,11 +47,12 @@ async function login(req, res) {
     const permissions = perms.map(p => p.code);
 
     const payload = {
-      userId: user.id,
-      email:  user.email,
-      fullName: user.full_name,
-      roleId: user.role_id,
-      roleName: user.role_name,
+      userId:     user.id,
+      email:      user.email,
+      fullName:   user.full_name,
+      roleId:     user.role_id,
+      roleName:   user.role_name,
+      locationId: user.location_id ?? null,
       permissions,
     };
 
@@ -80,7 +81,7 @@ async function refresh(req, res) {
   try {
     const hash = hashToken(refreshToken);
     const { rows: [stored] } = await pool.query(
-      `SELECT rt.*, u.id AS uid, u.email, u.full_name, u.is_active,
+      `SELECT rt.*, u.id AS uid, u.email, u.full_name, u.is_active, u.location_id,
               r.id AS role_id, r.name AS role_name
        FROM refresh_tokens rt
        JOIN users u ON rt.user_id = u.id
@@ -101,11 +102,12 @@ async function refresh(req, res) {
     );
 
     const payload = {
-      userId: stored.uid,
-      email:  stored.email,
-      fullName: stored.full_name,
-      roleId: stored.role_id,
-      roleName: stored.role_name,
+      userId:     stored.uid,
+      email:      stored.email,
+      fullName:   stored.full_name,
+      roleId:     stored.role_id,
+      roleName:   stored.role_name,
+      locationId: stored.location_id ?? null,
       permissions: perms.map(p => p.code),
     };
 

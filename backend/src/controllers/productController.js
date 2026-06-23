@@ -1,33 +1,50 @@
 const { pool }           = require('../db');
 const { checkAndNotify } = require('../services/stockAlertService');
 
-// GET /api/products?page=1&limit=20&search=&category_id=
+// GET /api/products?page=1&limit=20&search=&category_id=&location_id=
 async function list(req, res) {
-  const { search, category_id, page = 1, limit = 20 } = req.query;
+  const { search, category_id, location_id, page = 1, limit = 20 } = req.query;
   const pageNum  = parseInt(page);
   const limitNum = parseInt(limit);
   const offset   = (pageNum - 1) * limitNum;
+  const isAdmin  = ['Admin', 'Viewer'].includes(req.user.roleName);
 
   const conditions = [];
   const params     = [];
   let   idx        = 1;
 
-  if (search)      { conditions.push(`pcfg.name ILIKE $${idx++}`);       params.push(`%${search}%`); }
-  if (category_id) { conditions.push(`pcfg.category_id = $${idx++}`);    params.push(parseInt(category_id)); }
+  if (search)      { conditions.push(`pcfg.name ILIKE $${idx++}`);    params.push(`%${search}%`); }
+  if (category_id) { conditions.push(`pcfg.category_id = $${idx++}`); params.push(parseInt(category_id)); }
+
+  // Admins can filter by location via query param; cashiers are always scoped to their location
+  if (isAdmin && location_id) {
+    conditions.push(`p.location_id = $${idx++}`);
+    params.push(parseInt(location_id));
+  } else if (!isAdmin && req.user.locationId) {
+    conditions.push(`p.location_id = $${idx++}`);
+    params.push(req.user.locationId);
+  }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  // Stock summary scoped the same way
+  const stockWhere = (!isAdmin && req.user.locationId)
+    ? `WHERE location_id = ${req.user.locationId}`
+    : '';
 
   try {
     const [dataRes, countRes, stockRes] = await Promise.all([
       pool.query(`
-        SELECT p.id, p.config_id, p.stock_qty,
+        SELECT p.id, p.config_id, p.stock_qty, p.location_id,
                pcfg.name, pcfg.image_url, pcfg.standard_price, pcfg.description,
                COALESCE(p.purchase_price, pcfg.standard_price) AS purchase_price,
                p.purchase_price IS NOT NULL AS price_overridden,
-               cat.id AS category_id, cat.name AS category
+               cat.id AS category_id, cat.name AS category,
+               l.name AS location_name
         FROM products p
         JOIN product_configs pcfg ON p.config_id = pcfg.id
         JOIN product_categories cat ON pcfg.category_id = cat.id
+        LEFT JOIN locations l ON p.location_id = l.id
         ${where}
         ORDER BY cat.name, pcfg.name
         LIMIT $${idx} OFFSET $${idx + 1}
@@ -44,6 +61,7 @@ async function list(req, res) {
           COUNT(*) FILTER (WHERE stock_qty <= 0) AS out_of_stock,
           COUNT(*) FILTER (WHERE stock_qty > 0 AND stock_qty < 10) AS low_stock
         FROM products
+        ${stockWhere}
       `),
     ]);
 
@@ -73,18 +91,21 @@ async function listCategories(req, res) {
 // POST /api/products
 async function create(req, res) {
   const { config_id, purchase_price, initial_stock = 0 } = req.body;
-  if (!config_id)
-    return res.status(400).json({ error: 'config_id is required' });
+  if (!config_id) return res.status(400).json({ error: 'config_id is required' });
+
+  const isAdmin    = ['Admin', 'Viewer'].includes(req.user.roleName);
+  const locationId = isAdmin ? (req.body.location_id || null) : req.user.locationId;
+  if (!locationId) return res.status(400).json({ error: 'location_id is required' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const { rows: [product] } = await client.query(`
-      INSERT INTO products (config_id, purchase_price, stock_qty)
-      VALUES ($1, $2, $3)
+      INSERT INTO products (config_id, location_id, purchase_price, stock_qty)
+      VALUES ($1, $2, $3, $4)
       RETURNING *
-    `, [config_id, purchase_price || null, parseInt(initial_stock)]);
+    `, [config_id, locationId, purchase_price || null, parseInt(initial_stock)]);
 
     if (parseInt(initial_stock) > 0) {
       await client.query(`
@@ -95,7 +116,6 @@ async function create(req, res) {
 
     await client.query('COMMIT');
 
-    // Alert if initial stock is already low
     pool.query('SELECT name FROM product_configs WHERE id = $1', [config_id])
       .then(({ rows: [cfg] }) => checkAndNotify(product.id, parseInt(initial_stock), cfg?.name || 'Unknown'))
       .catch(err => console.error('[StockAlert]', err.message));
@@ -103,23 +123,25 @@ async function create(req, res) {
     res.status(201).json(product);
   } catch (err) {
     await client.query('ROLLBACK');
-    if (err.constraint === 'products_config_id_unique')
-      return res.status(409).json({ error: 'This product is already in inventory' });
+    if (err.constraint === 'products_config_location_unique')
+      return res.status(409).json({ error: 'This product is already in inventory for this location' });
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
   }
 }
 
-// PUT /api/products/:id  — only price override is editable here;
-// product details (name, category, image) are managed in /product-configs
+// PUT /api/products/:id
 async function update(req, res) {
   const { purchase_price } = req.body;
+  const isAdmin = ['Admin', 'Viewer'].includes(req.user.roleName);
   try {
+    const locationClause = (!isAdmin && req.user.locationId)
+      ? `AND location_id = ${req.user.locationId}` : '';
+
     const { rows: [product] } = await pool.query(`
-      UPDATE products
-      SET purchase_price = $1
-      WHERE id = $2
+      UPDATE products SET purchase_price = $1
+      WHERE id = $2 ${locationClause}
       RETURNING *
     `, [purchase_price ?? null, req.params.id]);
 
@@ -151,12 +173,16 @@ async function restock(req, res) {
   const qty = parseInt(quantity);
   if (!qty || qty <= 0) return res.status(400).json({ error: 'quantity must be a positive integer' });
 
-  const client = await pool.connect();
+  const isAdmin = ['Admin', 'Viewer'].includes(req.user.roleName);
+  const client  = await pool.connect();
   try {
     await client.query('BEGIN');
 
+    const locationClause = (!isAdmin && req.user.locationId)
+      ? `AND location_id = ${req.user.locationId}` : '';
+
     const { rows: [product] } = await client.query(
-      'UPDATE products SET stock_qty = stock_qty + $1 WHERE id = $2 RETURNING id, stock_qty',
+      `UPDATE products SET stock_qty = stock_qty + $1 WHERE id = $2 ${locationClause} RETURNING id, stock_qty`,
       [qty, req.params.id]
     );
     if (!product) return res.status(404).json({ error: 'Product not found' });
@@ -168,7 +194,6 @@ async function restock(req, res) {
 
     await client.query('COMMIT');
 
-    // Alert if restocked to still-low qty (edge case)
     pool.query(
       'SELECT p.stock_qty, pcfg.name FROM products p JOIN product_configs pcfg ON p.config_id = pcfg.id WHERE p.id = $1',
       [product.id]

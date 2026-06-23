@@ -6,7 +6,6 @@ import LoginPage   from './pages/LoginPage';
 import Dashboard   from './pages/Dashboard';
 import UsersPage        from './pages/UsersPage';
 import POSPage          from './pages/POSPage';
-import TransactionsPage from './pages/TransactionsPage';
 import InvoicesPage     from './pages/InvoicesPage';
 import ProductsPage       from './pages/ProductsPage';
 import ProductConfigsPage from './pages/ProductConfigsPage';
@@ -37,14 +36,6 @@ export default function App() {
             }
           />
 
-          <Route
-            path="/transactions"
-            element={
-              <PrivateRoute permission="transactions:read">
-                <TransactionsPage />
-              </PrivateRoute>
-            }
-          />
 
           <Route
             path="/products"

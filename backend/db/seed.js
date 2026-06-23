@@ -131,45 +131,53 @@ async function seed() {
     }
     console.log(`✓ Product configs : ${productKeys.length}`);
 
-    // 7b. Products (inventory entries — one per config)
-    const { rows: allConfigs } = await client.query('SELECT id FROM product_configs');
-    for (const cfg of allConfigs) {
-      await client.query(
-        'INSERT INTO products (config_id) VALUES ($1) ON CONFLICT (config_id) DO NOTHING',
-        [cfg.id]
-      );
-    }
-    console.log(`✓ Products        : ${allConfigs.length}`);
-
-    // 8. Invoices + Invoice Items (from CSV rows)
-    // Pre-build lookup maps to avoid per-row DB roundtrips
-    const machineMap   = {}; // machine name → { id, location_id }
-    const productMap   = {}; // product name  → id
-
+    // 7b. Products — one entry per (config, location) from CSV data
+    // Pre-build machine map first so we know which location each machine belongs to
+    const machineMap = {}; // machine name → { id, location_id }
     const { rows: machines } = await client.query(`
       SELECT vm.id, vm.name, r.location_id
       FROM vending_machines vm
       JOIN routes r ON vm.route_id = r.id
     `);
-    const { rows: products } = await client.query(`
-      SELECT p.id, pcfg.name
+    machines.forEach(m => { machineMap[m.name] = { id: m.id, location_id: m.location_id }; });
+
+    // Build config lookup map
+    const configMap = {}; // product name → config_id
+    const { rows: allConfigs } = await client.query('SELECT id, name FROM product_configs');
+    allConfigs.forEach(c => { configMap[c.name] = c.id; });
+
+    // Insert products for each (config, location) pair that appears in the CSV
+    const productLocationKeys = new Set();
+    for (const row of rows) {
+      const machine  = machineMap[row.Vending_Machine_Name];
+      const configId = configMap[row.Product_Info];
+      if (!machine || !configId) continue;
+      productLocationKeys.add(`${configId}:${machine.location_id}`);
+    }
+    for (const key of productLocationKeys) {
+      const [configId, locationId] = key.split(':');
+      await client.query(
+        'INSERT INTO products (config_id, location_id) VALUES ($1, $2) ON CONFLICT (config_id, location_id) DO NOTHING',
+        [parseInt(configId), parseInt(locationId)]
+      );
+    }
+    console.log(`✓ Products        : ${productLocationKeys.size}`);
+
+    // Build productMap: "configName:locationId" → product_id
+    const productMap = {};
+    const { rows: seededProducts } = await client.query(`
+      SELECT p.id, p.location_id, pcfg.name
       FROM products p
       JOIN product_configs pcfg ON p.config_id = pcfg.id
     `);
+    seededProducts.forEach(p => { productMap[`${p.name}:${p.location_id}`] = p.id; });
 
-    machines.forEach(m => { machineMap[m.name] = { id: m.id, location_id: m.location_id }; });
-    products.forEach(p => { productMap[p.name] = p.id; });
-
-    // 8. Initial stock — seed each product with a starting qty
-    // Uses a deterministic value based on product id to avoid randomness
+    // 8. Initial stock per product
     const { rows: allProducts } = await client.query('SELECT id FROM products');
     let stockCount = 0;
     for (const p of allProducts) {
       const initQty = 50 + (p.id % 10) * 15; // deterministic: 50–185
-      await client.query(
-        `UPDATE products SET stock_qty = $1 WHERE id = $2`,
-        [initQty, p.id]
-      );
+      await client.query('UPDATE products SET stock_qty = $1 WHERE id = $2', [initQty, p.id]);
       await client.query(`
         INSERT INTO stock_movements (product_id, type, quantity, notes)
         VALUES ($1, 'initial', $2, 'Opening stock from seed')
@@ -182,7 +190,7 @@ async function seed() {
 
     for (const row of rows) {
       const machine   = machineMap[row.Vending_Machine_Name];
-      const productId = productMap[row.Product_Info];
+      const productId = productMap[`${row.Product_Info}:${machine?.location_id}`];
       if (!machine || !productId || !row.Order_Number) continue;
 
       const orderAmount   = parseFloat(row.Order_Amount)    || 0;

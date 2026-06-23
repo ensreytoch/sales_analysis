@@ -11,15 +11,10 @@ async function list(req, res) {
     const params     = [];
     let   idx        = 1;
 
-    // Non-admin: restrict to their assigned location
-    if (!['Admin', 'Viewer'].includes(req.user.roleName)) {
-      const { rows: [user] } = await pool.query(
-        'SELECT location_id FROM users WHERE id = $1', [req.user.userId]
-      );
-      if (user?.location_id) {
-        conditions.push(`i.location_id = $${idx++}`);
-        params.push(user.location_id);
-      }
+    // Non-admin: restrict to their assigned location (from JWT)
+    if (!['Admin', 'Viewer'].includes(req.user.roleName) && req.user.locationId) {
+      conditions.push(`i.location_id = $${idx++}`);
+      params.push(req.user.locationId);
     }
 
     if (from)         { conditions.push(`i.created_at >= $${idx++}`);    params.push(from); }

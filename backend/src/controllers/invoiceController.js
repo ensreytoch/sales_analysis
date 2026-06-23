@@ -12,15 +12,10 @@ async function list(req, res) {
     const params     = [];
     let   idx        = 1;
 
-    // Non-admin/viewer: restrict to their location
-    if (!['Admin', 'Viewer'].includes(req.user.roleName)) {
-      const { rows: [user] } = await pool.query(
-        'SELECT location_id FROM users WHERE id = $1', [req.user.userId]
-      );
-      if (user?.location_id) {
-        conditions.push(`i.location_id = $${idx++}`);
-        params.push(user.location_id);
-      }
+    // Non-admin/viewer: restrict to their assigned location (from JWT)
+    if (!['Admin', 'Viewer'].includes(req.user.roleName) && req.user.locationId) {
+      conditions.push(`i.location_id = $${idx++}`);
+      params.push(req.user.locationId);
     }
 
     if (from)         { conditions.push(`i.created_at >= $${idx++}`);   params.push(from); }
@@ -69,6 +64,7 @@ async function list(req, res) {
 // GET /api/invoices/:id — full invoice with items
 async function getById(req, res) {
   try {
+    const isAdmin = ['Admin', 'Viewer'].includes(req.user.roleName);
     const { rows: [invoice] } = await pool.query(`
       SELECT i.*, u.full_name AS cashier_name,
              l.name AS location_name, o.name AS organization
@@ -77,7 +73,8 @@ async function getById(req, res) {
       JOIN organizations o ON l.organization_id = o.id
       LEFT JOIN users u    ON i.cashier_id      = u.id
       WHERE i.id = $1
-    `, [req.params.id]);
+        AND ($2::boolean OR i.location_id = $3)
+    `, [req.params.id, isAdmin, req.user.locationId]);
 
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 

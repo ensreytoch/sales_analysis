@@ -46,7 +46,13 @@ fi
 echo ""
 echo "==> Running Flyway migrations..."
 
-MIGRATIONS_PATH="$(pwd -W)/backend/db/migrations"
+if command -v wslpath &>/dev/null; then
+  MIGRATIONS_PATH="$(wslpath -m "$(pwd)")/backend/db/migrations"
+elif command -v cygpath &>/dev/null; then
+  MIGRATIONS_PATH="$(cygpath -m "$(pwd)")/backend/db/migrations"
+else
+  MIGRATIONS_PATH="$(pwd)/backend/db/migrations"
+fi
 
 docker run --rm \
   --network host \
@@ -66,16 +72,6 @@ fi
 
 echo "✓ Migrations applied successfully."
 
-# ── Seed Auth ─────────────────────────────────────────────────────────────────
-echo ""
-echo "==> Seeding auth (roles, permissions, users)..."
-(cd backend && npm run seed:auth)
-
-if [ $? -ne 0 ]; then
-  echo "x Auth seeding failed."
-  exit 1
-fi
-
 # ── Seed CSV Data ─────────────────────────────────────────────────────────────
 echo ""
 echo "==> Seeding data from cleaned_transactions.csv..."
@@ -83,6 +79,16 @@ echo "==> Seeding data from cleaned_transactions.csv..."
 
 if [ $? -ne 0 ]; then
   echo "x Seeding failed."
+  exit 1
+fi
+
+# ── Seed Auth ─────────────────────────────────────────────────────────────────
+echo ""
+echo "==> Seeding auth (roles, permissions, users)..."
+(cd backend && npm run seed:auth)
+
+if [ $? -ne 0 ]; then
+  echo "x Auth seeding failed."
   exit 1
 fi
 

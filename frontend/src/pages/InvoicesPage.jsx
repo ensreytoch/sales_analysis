@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { ChevronLeft, ChevronRight, FileText, Loader2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronDown, ChevronRight as ChevronRt, FileText, Loader2 } from 'lucide-react';
 import Sidebar  from '../components/Sidebar';
 import Header   from '../components/Header';
-import InvoiceModal, { normalizeInvoice } from '../components/InvoiceModal';
 import api from '../services/api';
 
-const SOURCE_OPTS   = [{ value: '', label: 'All Sources' }, { value: 'pos', label: 'POS' }, { value: 'historical', label: 'Historical' }];
-const PAYMENT_OPTS  = [{ value: '', label: 'All Payments' }, { value: 'Cash', label: 'Cash' }, { value: 'Other Payment', label: 'Other Payment' }];
+const SOURCE_OPTS  = [{ value: '', label: 'All Sources' }, { value: 'pos', label: 'POS' }, { value: 'historical', label: 'Historical' }];
+const PAYMENT_OPTS = [{ value: '', label: 'All Payments' }, { value: 'Cash', label: 'Cash' }, { value: 'Other Payment', label: 'Other Payment' }];
+const LIMIT = 20;
 
 function SourceBadge({ source }) {
   if (source === 'pos')
@@ -19,26 +19,31 @@ function StatusBadge({ status }) {
   return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold capitalize ${color}`}>{status}</span>;
 }
 
+function fmtDate(str) {
+  if (!str) return '—';
+  return new Date(/Z|[+-]\d{2}:/.test(str) ? str : str + 'Z').toLocaleString();
+}
+
 export default function InvoicesPage() {
-  const [invoices,     setInvoices]     = useState([]);
-  const [loading,      setLoading]      = useState(true);
-  const [total,        setTotal]        = useState(0);
-  const [page,         setPage]         = useState(1);
-  const [selected,     setSelected]     = useState(null);   // normalized invoice for modal
-  const [detailLoading, setDetailLoading] = useState(false);
+  const [invoices,  setInvoices]  = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [total,     setTotal]     = useState(0);
+  const [page,      setPage]      = useState(1);
+  const [filters,   setFilters]   = useState({ from: '', to: '', payment_type: '', source: '' });
 
-  const [filters, setFilters] = useState({ from: '', to: '', payment_type: '', source: '' });
-  const LIMIT = 20;
+  // expand state
+  const [expanded,   setExpanded]   = useState(new Set());  // set of invoice IDs
+  const [itemCache,  setItemCache]  = useState({});          // { [id]: items[] }
+  const [loadingRow, setLoadingRow] = useState(null);        // id being fetched
 
-  const fetchInvoices = useCallback(async (p = page) => {
+  const fetchInvoices = useCallback(async (p = page, f = filters) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page: p, limit: LIMIT });
-      if (filters.from)         params.set('from',         filters.from);
-      if (filters.to)           params.set('to',           filters.to);
-      if (filters.payment_type) params.set('payment_type', filters.payment_type);
-      if (filters.source)       params.set('source',       filters.source);
-
+      if (f.from)         params.set('from',         f.from);
+      if (f.to)           params.set('to',           f.to);
+      if (f.payment_type) params.set('payment_type', f.payment_type);
+      if (f.source)       params.set('source',       f.source);
       const { data } = await api.get(`/invoices?${params}`);
       setInvoices(data.data);
       setTotal(data.total);
@@ -47,32 +52,46 @@ export default function InvoicesPage() {
     } finally {
       setLoading(false);
     }
-  }, [filters, page]);
+  }, [page, filters]);
 
-  useEffect(() => { fetchInvoices(page); }, [page]);
+  useEffect(() => { fetchInvoices(page, filters); }, [page]);
 
-  const applyFilters = () => { setPage(1); fetchInvoices(1); };
+  const applyFilters = () => { setPage(1); fetchInvoices(1, filters); };
+  const resetFilters = () => {
+    const empty = { from: '', to: '', payment_type: '', source: '' };
+    setFilters(empty);
+    setPage(1);
+    fetchInvoices(1, empty);
+  };
 
-  const openInvoice = async (id) => {
-    setDetailLoading(true);
+  const toggleRow = async (id) => {
+    if (expanded.has(id)) {
+      setExpanded(prev => { const s = new Set(prev); s.delete(id); return s; });
+      return;
+    }
+    setExpanded(prev => new Set(prev).add(id));
+    if (itemCache[id]) return; // already fetched
+    setLoadingRow(id);
     try {
       const { data } = await api.get(`/invoices/${id}`);
-      setSelected(normalizeInvoice(data));
+      setItemCache(prev => ({ ...prev, [id]: data.items || [] }));
     } catch (err) {
       console.error(err);
+      setItemCache(prev => ({ ...prev, [id]: [] }));
     } finally {
-      setDetailLoading(false);
+      setLoadingRow(null);
     }
   };
 
   const totalPages = Math.max(1, Math.ceil(total / LIMIT));
+  const COLS = 10; // expand + Receipt + Date + Cashier + Location + Items + Total + Payment + Source + Status
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
       <Sidebar />
 
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-        <Header loading={loading} onRefresh={() => fetchInvoices(page)} />
+        <Header loading={loading} onRefresh={() => fetchInvoices(page, filters)} />
 
         <main className="flex-1 flex flex-col overflow-hidden p-6 gap-4 min-h-0">
 
@@ -121,7 +140,7 @@ export default function InvoicesPage() {
               className="px-5 py-2 text-sm font-semibold bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition">
               Apply
             </button>
-            <button onClick={() => { setFilters({ from: '', to: '', payment_type: '', source: '' }); setPage(1); setTimeout(() => fetchInvoices(1), 0); }}
+            <button onClick={resetFilters}
               className="px-4 py-2 text-sm text-gray-500 border border-gray-200 rounded-xl hover:bg-gray-50 transition">
               Reset
             </button>
@@ -133,35 +152,87 @@ export default function InvoicesPage() {
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-gray-50 border-b border-gray-100 z-10">
                   <tr>
+                    <th className="px-2 py-3 w-8"/>
                     {['Receipt #', 'Date & Time', 'Cashier', 'Location', 'Items', 'Total', 'Payment', 'Source', 'Status'].map(h => (
                       <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wide whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-50">
+                <tbody>
                   {loading ? (
-                    <tr><td colSpan={9} className="py-16 text-center">
+                    <tr><td colSpan={COLS} className="py-16 text-center">
                       <Loader2 size={24} className="animate-spin text-blue-500 mx-auto"/>
                     </td></tr>
                   ) : invoices.length === 0 ? (
-                    <tr><td colSpan={9} className="py-16 text-center text-gray-400 text-sm">No invoices found</td></tr>
-                  ) : invoices.map(inv => (
-                    <tr key={inv.id}
-                      onClick={() => openInvoice(inv.id)}
-                      className="hover:bg-blue-50/40 cursor-pointer transition">
-                      <td className="px-4 py-3 font-mono text-xs text-gray-500">{inv.receipt_no}</td>
-                      <td className="px-4 py-3 text-gray-600 text-xs whitespace-nowrap">
-                        {new Date(/Z|[+-]\d{2}:/.test(inv.created_at) ? inv.created_at : inv.created_at + 'Z').toLocaleString()}
-                      </td>
-                      <td className="px-4 py-3 text-gray-700">{inv.cashier_name || <span className="text-gray-300">—</span>}</td>
-                      <td className="px-4 py-3 text-gray-600 text-xs">{inv.location_name}</td>
-                      <td className="px-4 py-3 text-center text-gray-500 text-xs">{inv.item_count}</td>
-                      <td className="px-4 py-3 font-semibold text-gray-800 text-right">${Number(inv.total_amount).toFixed(2)}</td>
-                      <td className="px-4 py-3 text-gray-500 text-xs">{inv.payment_type || '—'}</td>
-                      <td className="px-4 py-3"><SourceBadge source={inv.source}/></td>
-                      <td className="px-4 py-3"><StatusBadge status={inv.payment_status}/></td>
-                    </tr>
-                  ))}
+                    <tr><td colSpan={COLS} className="py-16 text-center text-gray-400 text-sm">No invoices found</td></tr>
+                  ) : invoices.map(inv => {
+                    const isOpen = expanded.has(inv.id);
+                    const items  = itemCache[inv.id];
+                    const fetching = loadingRow === inv.id;
+                    return (
+                      <React.Fragment key={inv.id}>
+                        <tr className="border-b border-gray-50 hover:bg-blue-50/30 transition">
+                          {/* Expand toggle */}
+                          <td className="px-2 py-3 text-center">
+                            <button
+                              onClick={() => toggleRow(inv.id)}
+                              className="p-1 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-blue-600 transition"
+                            >
+                              {fetching
+                                ? <Loader2 size={14} className="animate-spin"/>
+                                : isOpen
+                                  ? <ChevronDown size={14}/>
+                                  : <ChevronRt size={14}/>}
+                            </button>
+                          </td>
+                          <td className="px-4 py-3 font-mono text-xs text-gray-500 whitespace-nowrap">{inv.receipt_no}</td>
+                          <td className="px-4 py-3 text-gray-600 text-xs whitespace-nowrap">{fmtDate(inv.created_at)}</td>
+                          <td className="px-4 py-3 text-gray-700">{inv.cashier_name || <span className="text-gray-300">—</span>}</td>
+                          <td className="px-4 py-3 text-gray-600 text-xs">{inv.location_name}</td>
+                          <td className="px-4 py-3 text-center text-gray-500 text-xs">{inv.item_count}</td>
+                          <td className="px-4 py-3 font-semibold text-gray-800 text-right whitespace-nowrap">${Number(inv.total_amount).toFixed(2)}</td>
+                          <td className="px-4 py-3 text-gray-500 text-xs">{inv.payment_type || '—'}</td>
+                          <td className="px-4 py-3"><SourceBadge source={inv.source}/></td>
+                          <td className="px-4 py-3"><StatusBadge status={inv.payment_status}/></td>
+                        </tr>
+
+                        {/* Expanded items sub-row */}
+                        {isOpen && (
+                          <tr className="bg-blue-50/20 border-b border-blue-100">
+                            <td/>
+                            <td colSpan={COLS - 1} className="px-6 py-3">
+                              {!items ? (
+                                <p className="text-xs text-gray-400 py-2">Loading items…</p>
+                              ) : items.length === 0 ? (
+                                <p className="text-xs text-gray-400 py-2">No items found.</p>
+                              ) : (
+                                <table className="w-full text-xs">
+                                  <thead>
+                                    <tr className="text-gray-400 uppercase tracking-wide">
+                                      <th className="text-left pb-1.5 font-semibold">Product</th>
+                                      <th className="text-center pb-1.5 font-semibold w-16">Qty</th>
+                                      <th className="text-right pb-1.5 font-semibold w-24">Unit Price</th>
+                                      <th className="text-right pb-1.5 font-semibold w-24">Subtotal</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-blue-100">
+                                    {items.map((item, i) => (
+                                      <tr key={i}>
+                                        <td className="py-1.5 text-gray-700 font-medium">{item.product_name}</td>
+                                        <td className="py-1.5 text-center text-gray-500">{item.quantity}</td>
+                                        <td className="py-1.5 text-right text-gray-600">${Number(item.unit_price).toFixed(2)}</td>
+                                        <td className="py-1.5 text-right font-semibold text-gray-800">${Number(item.subtotal).toFixed(2)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -186,16 +257,6 @@ export default function InvoicesPage() {
           </div>
         </main>
       </div>
-
-      {/* Detail modal */}
-      {detailLoading && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-          <Loader2 size={32} className="animate-spin text-white"/>
-        </div>
-      )}
-      {selected && !detailLoading && (
-        <InvoiceModal invoice={selected} onClose={() => setSelected(null)}/>
-      )}
     </div>
   );
 }

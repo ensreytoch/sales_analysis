@@ -32,9 +32,9 @@ async function getProducts(req, res) {
       FROM products p
       JOIN product_configs pcfg ON p.config_id = pcfg.id
       JOIN product_categories cat ON pcfg.category_id = cat.id
-      WHERE pcfg.is_active = TRUE
+      WHERE pcfg.is_active = TRUE AND p.location_id = $1
       ORDER BY cat.name, pcfg.name
-    `);
+    `, [req.user.locationId]);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -51,10 +51,8 @@ async function sell(req, res) {
   try {
     await client.query('BEGIN');
 
-    const { rows: [user] } = await client.query(
-      'SELECT location_id FROM users WHERE id = $1', [req.user.userId]
-    );
-    if (!user?.location_id) throw new Error('No location assigned to your account');
+    const locationId = req.user.locationId;
+    if (!locationId) throw new Error('No location assigned to your account');
 
     const subtotal   = items.reduce((sum, i) => sum + parseFloat(i.price) * parseInt(i.quantity), 0);
     const receiptNo  = `RCP-${Date.now().toString().slice(-8)}`;
@@ -65,7 +63,7 @@ async function sell(req, res) {
         (receipt_no, cashier_id, location_id, payment_type, subtotal, total_amount, source, notes)
       VALUES ($1,$2,$3,$4,$5,$5,'pos',$6)
       RETURNING *
-    `, [receiptNo, req.user.userId, user.location_id, payment_type, subtotal, notes || null]);
+    `, [receiptNo, req.user.userId, locationId, payment_type, subtotal, notes || null]);
 
     for (const item of items) {
       const qty = parseInt(item.quantity);
@@ -130,10 +128,10 @@ async function listInvoices(req, res) {
 
   try {
     const isAdmin = ['Admin', 'Viewer'].includes(req.user.roleName);
-    const filter  = isAdmin ? '' : 'WHERE i.cashier_id = $3';
-    const params  = isAdmin
-      ? [parseInt(limit), offset]
-      : [parseInt(limit), offset, req.user.userId];
+    const filter  = (!isAdmin && req.user.locationId) ? 'WHERE i.location_id = $3' : '';
+    const params  = (!isAdmin && req.user.locationId)
+      ? [parseInt(limit), offset, req.user.locationId]
+      : [parseInt(limit), offset];
 
     const { rows } = await pool.query(`
       SELECT i.id, i.receipt_no, i.payment_type, i.payment_status,
@@ -156,6 +154,7 @@ async function listInvoices(req, res) {
 // GET /api/pos/invoices/:id — invoice with items
 async function getInvoice(req, res) {
   try {
+    const isAdmin = ['Admin', 'Viewer'].includes(req.user.roleName);
     const { rows: [invoice] } = await pool.query(`
       SELECT i.*, u.full_name AS cashier_name,
              l.name AS location_name, o.name AS organization
@@ -164,7 +163,8 @@ async function getInvoice(req, res) {
       JOIN organizations o ON l.organization_id = o.id
       LEFT JOIN users u    ON i.cashier_id = u.id
       WHERE i.id = $1
-    `, [req.params.id]);
+        AND ($2::boolean OR i.location_id = $3)
+    `, [req.params.id, isAdmin, req.user.locationId]);
 
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
